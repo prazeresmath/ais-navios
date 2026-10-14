@@ -1,0 +1,119 @@
+# Fase 1 — Kafka (KRaft, nó único) + ClickHouse + producer AIS + Kafbat UI
+#
+#   docker compose up -d --build      sobe tudo
+#   docker compose logs -f producer   acompanha a ingestão
+#   docker compose down               para (os dados ficam nos volumes)
+#   docker compose down -v            para e APAGA os dados
+#
+# Portas no host:
+#   9094  Kafka (para clientes fora do Docker: localhost:9094)
+#   8080  Kafbat UI (http://localhost:8080)
+#   8123  ClickHouse HTTP (http://localhost:8123/play)
+
+name: ais-navios
+
+services:
+  kafka:
+    image: apache/kafka:4.1.0
+    hostname: kafka
+    restart: unless-stopped
+    ports:
+      - "9094:9094"
+    environment:
+      # Nó único fazendo papel de broker e controller (KRaft, sem ZooKeeper)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # PLAINTEXT: tráfego entre containers | EXTERNAL: acesso a partir do host
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Um broker só -> replicação 1 nos tópicos internos
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Tópicos são criados explicitamente pelo kafka-init (evita tópico criado por engano)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      CLUSTER_ID: Xqdoiv_IRXuX4Lc9JM9-1w   # UUID em base64, gerado uma vez e fixo
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    # Roda uma vez, cria os tópicos e termina
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic ais.raw \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=604800000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic ais.raw
+    restart: "no"
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.3.0
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ais-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  clickhouse:
+    # Sobe já na Fase 1; as tabelas que leem o Kafka entram na Fase 2
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: ais
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ais}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Defina CLICKHOUSE_PASSWORD no .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  producer:
+    build: ./producer
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:?Defina AISSTREAM_API_KEY no .env}
+      AIS_BBOX: ${AIS_BBOX:--24.20,-46.50,-23.85,-46.05}
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ais.raw
+
+volumes:
+  kafka-data:
+  clickhouse-data:
