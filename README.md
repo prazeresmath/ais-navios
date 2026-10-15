@@ -18,8 +18,8 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 | Fase | Entrega | Status |
 |---|---|---|
 | 1 | Kafka + ClickHouse no Docker, producer publicando no tópico `ais.raw` | ✅ |
-| 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | 🔄 |
-| 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | ⏳ |
+| 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | ✅ |
+| 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | 🔄 |
 | 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | ⏳ |
 | 5 | Métricas no Grafana | ⏳ |
 
@@ -48,6 +48,20 @@ Views: ships · positions_dedup · latest_positions
 - **Valores "indisponível" do AIS viram `NULL`:** velocidade 102,3, rumo 360, proa 511, posição 91/181.
 - Consultas de validação em [`clickhouse/queries/validacao.sql`](clickhouse/queries/validacao.sql).
 
+## Mapa ao vivo (live-api)
+
+```
+Kafka ais.raw ─▶ live-api (FastAPI) ── estado em memória: última posição + rastro por navio
+                    │  ao ligar: offsets_for_times(agora − 60 min) → relê a última hora
+                    └─ WebSocket /ws ─▶ navegador (MapLibre): snapshot ao conectar + 1 msg por atualização
+```
+
+- **Sem banco no caminho ao vivo:** o mapa é alimentado só pelo stream; o ClickHouse fica para histórico e análise.
+- **Warmup por tempo, não por commit:** cada execução usa um consumer group descartável e posiciona os offsets em *agora − 60 min*. Reiniciar o serviço nunca deixa o mapa vazio, e não há offset comprometido para gerenciar.
+- **Dead reckoning no navegador:** entre mensagens (60–90 s em Santos), a posição é estimada por velocidade e rumo; quando a posição real chega, o ícone desliza até ela em 2 s em vez de pular. Extrapolação limitada a 3 min.
+- **Mensagens fora de ordem:** posição com horário anterior à já conhecida é ignorada.
+- Mapa base: [OpenFreeMap](https://openfreemap.org) + camada náutica do [OpenSeaMap](https://www.openseamap.org) (boias, canais, fundeadouros).
+
 ## Como rodar
 
 Pré-requisitos: Docker Desktop e uma API key gratuita do [aisstream.io](https://aisstream.io).
@@ -62,6 +76,7 @@ docker compose logs -f producer
 
 | Serviço | Endereço |
 |---|---|
+| **Mapa ao vivo** | http://localhost:8000 |
 | Kafbat UI (tópicos e mensagens) | http://localhost:8080 |
 | ClickHouse (console SQL) | http://localhost:8123/play |
 | Kafka para clientes no host | `localhost:9094` |
@@ -74,7 +89,8 @@ Parar: `docker compose down` (mantém os dados) · `docker compose down -v` (apa
 producer/            WebSocket aisstream.io -> Kafka
 clickhouse/schema/   DDL aplicado pelo clickhouse-init a cada `up` (idempotente)
 clickhouse/queries/  consultas de validação
-docker-compose.yml   Kafka (KRaft), kafka-init, Kafbat UI, ClickHouse, clickhouse-init, producer
+live-api/            FastAPI: Kafka -> estado em memória -> WebSocket; serve o mapa (static/)
+docker-compose.yml   Kafka (KRaft), kafka-init, Kafbat UI, ClickHouse, clickhouse-init, producer, live-api
 .env.example         variáveis necessárias (sem valores)
 ```
 

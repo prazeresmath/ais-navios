@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIS Navios — Porto de Santos ao vivo</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <aside id="panel">
+    <header>
+      <h1>Porto de Santos <span>ao vivo</span></h1>
+      <div id="conn" class="conn conn--off" title="Conexão com o servidor">
+        <span class="dot"></span><span id="conn-text">conectando…</span>
+      </div>
+    </header>
+
+    <dl class="stats">
+      <div><dt>Navios</dt><dd id="st-total">–</dd></div>
+      <div><dt>Em movimento</dt><dd id="st-moving">–</dd></div>
+      <div><dt>Parados</dt><dd id="st-stopped">–</dd></div>
+    </dl>
+
+    <ul id="legend" class="legend"></ul>
+
+    <p class="note">
+      Posições do aisstream.io via Kafka. Entre uma mensagem e outra a posição é
+      estimada pela velocidade e pelo rumo (<em>dead reckoning</em>).
+      Navio esmaecido: sem sinal há mais de 30 min.
+    </p>
+  </aside>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

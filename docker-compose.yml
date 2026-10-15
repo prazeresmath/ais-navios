@@ -1,5 +1,6 @@
 # Kafka (KRaft, nó único) + ClickHouse + producer AIS + Kafbat UI
 # Fase 1: ingestão no tópico ais.raw | Fase 2: ClickHouse consome o tópico (bronze -> silver)
+# Fase 3: live-api consome o tópico e empurra posições para o mapa (http://localhost:8000)
 #
 #   docker compose up -d --build      sobe tudo
 #   docker compose logs -f producer   acompanha a ingestão
@@ -10,6 +11,7 @@
 #   9094  Kafka (para clientes fora do Docker: localhost:9094)
 #   8080  Kafbat UI (http://localhost:8080)
 #   8123  ClickHouse HTTP (http://localhost:8123/play)
+#   8000  Mapa ao vivo (http://localhost:8000)
 
 name: ais-navios
 
@@ -140,6 +142,21 @@ services:
       AIS_BBOX: ${AIS_BBOX:--24.20,-46.50,-23.85,-46.05}
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_TOPIC: ais.raw
+
+  live-api:
+    # Lê o tópico direto (sem ClickHouse): relê a última hora ao ligar e segue ao vivo
+    build: ./live-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ais.raw
+      WARMUP_MINUTES: ${WARMUP_MINUTES:-60}
+      SHIP_MAX_AGE_H: ${SHIP_MAX_AGE_H:-6}
 
 volumes:
   kafka-data:

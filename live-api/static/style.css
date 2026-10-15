@@ -1,0 +1,50 @@
+:root {
+  --bg: rgba(255, 255, 255, 0.94);
+  --fg: #1d2733;
+  --muted: #5d6b7a;
+  --line: #d9e0e7;
+  --ok: #1f9d55;
+  --off: #c0392b;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font-family: var(--font); color: var(--fg); background: #dfe8ef; }
+#map { position: absolute; inset: 0; }
+
+#panel {
+  position: absolute; top: 12px; left: 12px; width: 280px; max-width: calc(100vw - 24px);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; box-shadow: 0 4px 18px rgba(20, 40, 60, 0.15);
+  font-size: 13px; line-height: 1.4; z-index: 2;
+}
+#panel header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+#panel h1 { font-size: 16px; margin: 0; }
+#panel h1 span { font-weight: 400; color: var(--muted); }
+
+.conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+.conn--on .dot { background: var(--ok); animation: pulse 2s infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
+.stats div { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.stats dt { font-size: 11px; color: var(--muted); }
+.stats dd { margin: 0; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.legend { list-style: none; padding: 0; margin: 0 0 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+.note { margin: 0; font-size: 11.5px; color: var(--muted); }
+
+.maplibregl-popup-content { font-family: var(--font); font-size: 12.5px; padding: 10px 12px; min-width: 210px; }
+.popup h2 { font-size: 14px; margin: 0 0 6px; }
+.popup table { border-collapse: collapse; width: 100%; }
+.popup td { padding: 1px 0; vertical-align: top; }
+.popup td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
+
+@media (max-width: 520px) {
+  #panel { top: auto; bottom: 34px; width: auto; right: 12px; padding: 10px 12px; }
+  .legend, .note { display: none; }
+}
