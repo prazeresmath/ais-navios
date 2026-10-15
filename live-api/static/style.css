@@ -33,8 +33,17 @@ html, body { margin: 0; height: 100%; font-family: var(--font); color: var(--fg)
 .stats dd { margin: 0; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .legend { list-style: none; padding: 0; margin: 0 0 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
-.legend li { display: flex; align-items: center; gap: 6px; }
-.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.legend-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; font-size: 12px; font-weight: 600; }
+.legend-head small { font-weight: 400; color: var(--muted); }
+.legend-head button { border: 0; background: none; padding: 0; font: inherit; font-size: 11.5px; font-weight: 400; color: #2f6fd6; cursor: pointer; }
+.legend button {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 2px 4px; margin: 0 -4px;
+  border: 0; border-radius: 4px; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.legend button:hover { background: rgba(47, 111, 214, 0.08); }
+.legend button[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
+.legend button[aria-pressed="false"] i { opacity: 0.25; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
 
 .note { margin: 0; font-size: 11.5px; color: var(--muted); }
 
@@ -46,5 +55,5 @@ html, body { margin: 0; height: 100%; font-family: var(--font); color: var(--fg)
 
 @media (max-width: 520px) {
   #panel { top: auto; bottom: 34px; width: auto; right: 12px; padding: 10px 12px; }
-  .legend, .note { display: none; }
+  .legend, .legend-head, .note { display: none; }
 }

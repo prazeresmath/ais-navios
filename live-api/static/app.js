@@ -33,6 +33,10 @@ const CATEGORY_COLORS = {
 /** mmsi -> { data, from: [lon, lat] | null, blendStart: ms } */
 const ships = new Map();
 
+/** Categorias escondidas pelo filtro da legenda */
+const hidden = new Set();
+const isVisible = (s) => !hidden.has(s.category || "Outros");
+
 // ---------------------------------------------------------------- geometria
 
 const M_PER_DEG_LAT = 111320;
@@ -93,6 +97,8 @@ function shipFeatures(nowMs) {
     const s = entry.data;
     const pos = displayed(entry, nowMs);
     entry.pos = pos;
+    if (!isVisible(s)) continue;
+    const category = CATEGORY_COLORS[s.category] ? s.category : "Outros";
     const age = s.ts != null ? nowMs / 1000 - s.ts : Infinity;
     const moving = isMoving(s);
     const rotation = s.heading != null ? s.heading : (s.cog != null ? s.cog : 0);
@@ -101,9 +107,8 @@ function shipFeatures(nowMs) {
       geometry: { type: "Point", coordinates: pos },
       properties: {
         mmsi: s.mmsi,
-        icon: moving ? "ship-moving" : "ship-stopped",
+        icon: `${moving ? "moving" : "stopped"}-${category}`,
         rotation,
-        color: CATEGORY_COLORS[s.category] || CATEGORY_COLORS.Outros,
         opacity: age > STALE_S ? 0.35 : 1,
         label: s.name || "",
       },
@@ -124,13 +129,19 @@ function shipFeatures(nowMs) {
   };
 }
 
-/** Ícones desenhados no canvas como SDF, para poder colorir por categoria. */
-function makeIcon(kind) {
+/**
+ * Ícone desenhado no canvas: forma colorida pela categoria com contorno branco,
+ * para destacar das boias do OpenSeaMap. Um ícone por forma x categoria.
+ */
+function makeIcon(kind, color) {
   const size = 48;
   const c = document.createElement("canvas");
   c.width = c.height = size;
   const g = c.getContext("2d");
-  g.fillStyle = "#000";
+  g.fillStyle = color;
+  g.strokeStyle = "#ffffff";
+  g.lineWidth = 4;
+  g.lineJoin = "round";
   g.beginPath();
   if (kind === "moving") {
     // Seta apontando para cima (proa); o MapLibre gira pelo heading
@@ -140,27 +151,46 @@ function makeIcon(kind) {
     g.moveTo(24, 8); g.lineTo(38, 24); g.lineTo(24, 40); g.lineTo(10, 24);
   }
   g.closePath();
+  g.stroke();
   g.fill();
+  g.lineWidth = 1;
+  g.strokeStyle = "rgba(0, 0, 0, 0.35)";
+  g.stroke();
   return g.getImageData(0, 0, size, size);
 }
 
 // ---------------------------------------------------------------- painel
 
 function updateStats() {
-  let moving = 0;
-  for (const { data } of ships.values()) if (isMoving(data)) moving++;
-  document.getElementById("st-total").textContent = ships.size;
+  let total = 0, moving = 0;
+  for (const { data } of ships.values()) {
+    if (!isVisible(data)) continue;
+    total++;
+    if (isMoving(data)) moving++;
+  }
+  document.getElementById("st-total").textContent = total;
   document.getElementById("st-moving").textContent = moving;
-  document.getElementById("st-stopped").textContent = ships.size - moving;
+  document.getElementById("st-stopped").textContent = total - moving;
 }
 
 function buildLegend() {
   const ul = document.getElementById("legend");
   for (const [name, color] of Object.entries(CATEGORY_COLORS)) {
     const li = document.createElement("li");
-    li.innerHTML = `<i style="background:${color}"></i>${name}`;
+    li.innerHTML = `<button type="button" aria-pressed="true"><i style="background:${color}"></i>${name}</button>`;
+    li.querySelector("button").addEventListener("click", (ev) => {
+      const btn = ev.currentTarget;
+      if (hidden.has(name)) hidden.delete(name); else hidden.add(name);
+      btn.setAttribute("aria-pressed", String(!hidden.has(name)));
+      updateStats();
+    });
     ul.appendChild(li);
   }
+  document.getElementById("legend-all").addEventListener("click", () => {
+    hidden.clear();
+    ul.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "true"));
+    updateStats();
+  });
 }
 
 function setConnection(on, text) {
@@ -239,8 +269,10 @@ map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top
 map.addControl(new maplibregl.ScaleControl({ unit: "nautical" }), "bottom-right");
 
 map.on("load", () => {
-  map.addImage("ship-moving", makeIcon("moving"), { sdf: true });
-  map.addImage("ship-stopped", makeIcon("stopped"), { sdf: true });
+  for (const [name, color] of Object.entries(CATEGORY_COLORS)) {
+    map.addImage(`moving-${name}`, makeIcon("moving", color));
+    map.addImage(`stopped-${name}`, makeIcon("stopped", color));
+  }
 
   // Camada náutica (boias, canais, fundeadouros)
   map.addSource("seamarks", {
@@ -249,7 +281,7 @@ map.on("load", () => {
     tileSize: 256,
     attribution: '© <a href="https://www.openseamap.org" target="_blank">OpenSeaMap</a>',
   });
-  map.addLayer({ id: "seamarks", type: "raster", source: "seamarks", minzoom: 9 });
+  map.addLayer({ id: "seamarks", type: "raster", source: "seamarks", minzoom: 9, paint: { "raster-opacity": 0.6 } });
 
   const empty = { type: "FeatureCollection", features: [] };
   map.addSource("trails", { type: "geojson", data: empty });
@@ -267,7 +299,7 @@ map.on("load", () => {
       "icon-rotation-alignment": "map",
       "icon-allow-overlap": true,
       "icon-ignore-placement": true,
-      "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.32, 13, 0.55, 16, 0.8],
+      "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.42, 13, 0.72, 16, 1.05],
       "text-field": ["step", ["zoom"], "", 13, ["get", "label"]],
       "text-size": 11,
       "text-offset": [0, 1.4],
@@ -275,9 +307,6 @@ map.on("load", () => {
       "text-optional": true,
     },
     paint: {
-      "icon-color": ["get", "color"],
-      "icon-halo-color": "#ffffff",
-      "icon-halo-width": 1.5,
       "icon-opacity": ["get", "opacity"],
       "text-color": "#1d2733",
       "text-halo-color": "#ffffff",

@@ -19,7 +19,7 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 |---|---|---|
 | 1 | Kafka + ClickHouse no Docker, producer publicando no tópico `ais.raw` | ✅ |
 | 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | ✅ |
-| 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | 🔄 |
+| 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | ✅ |
 | 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | ⏳ |
 | 5 | Métricas no Grafana | ⏳ |
 
@@ -60,6 +60,7 @@ Kafka ais.raw ─▶ live-api (FastAPI) ── estado em memória: última posi�
 - **Warmup por tempo, não por commit:** cada execução usa um consumer group descartável e posiciona os offsets em *agora − 60 min*. Reiniciar o serviço nunca deixa o mapa vazio, e não há offset comprometido para gerenciar.
 - **Dead reckoning no navegador:** entre mensagens (60–90 s em Santos), a posição é estimada por velocidade e rumo; quando a posição real chega, o ícone desliza até ela em 2 s em vez de pular. Extrapolação limitada a 3 min.
 - **Mensagens fora de ordem:** posição com horário anterior à já conhecida é ignorada.
+- Ícones coloridos por categoria com contorno branco (destacam das boias); filtro por categoria clicando na legenda.
 - Mapa base: [OpenFreeMap](https://openfreemap.org) + camada náutica do [OpenSeaMap](https://www.openseamap.org) (boias, canais, fundeadouros).
 
 ## Como rodar
