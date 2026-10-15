@@ -1,4 +1,5 @@
-# Fase 1 — Kafka (KRaft, nó único) + ClickHouse + producer AIS + Kafbat UI
+# Kafka (KRaft, nó único) + ClickHouse + producer AIS + Kafbat UI
+# Fase 1: ingestão no tópico ais.raw | Fase 2: ClickHouse consome o tópico (bronze -> silver)
 #
 #   docker compose up -d --build      sobe tudo
 #   docker compose logs -f producer   acompanha a ingestão
@@ -79,7 +80,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
 
   clickhouse:
-    # Sobe já na Fase 1; as tabelas que leem o Kafka entram na Fase 2
+    # Tabelas e MVs são criadas pelo clickhouse-init (clickhouse/schema/*.sql)
     image: clickhouse/clickhouse-server:25.8
     restart: unless-stopped
     ports:
@@ -101,6 +102,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  clickhouse-init:
+    # Roda uma vez a cada `up`: aplica clickhouse/schema/*.sql em ordem.
+    # Os scripts são idempotentes (IF NOT EXISTS / OR REPLACE), então rodar de novo não quebra nada.
+    image: clickhouse/clickhouse-server:25.8
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ais}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Defina CLICKHOUSE_PASSWORD no .env}
+    volumes:
+      - ./clickhouse/schema:/schema:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        for f in /schema/*.sql; do
+          echo "Aplicando $$f"
+          clickhouse-client --host clickhouse --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" \
+            --multiquery --queries-file "$$f"
+        done
+        echo "Schema aplicado."
+    restart: "no"
 
   producer:
     build: ./producer

@@ -18,7 +18,7 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 | Fase | Entrega | Status |
 |---|---|---|
 | 1 | Kafka + ClickHouse no Docker, producer publicando no tópico `ais.raw` | ✅ |
-| 2 | Histórico no ClickHouse via Kafka Engine + Materialized View | ⏳ |
+| 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | 🔄 |
 | 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | ⏳ |
 | 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | ⏳ |
 | 5 | Métricas no Grafana | ⏳ |
@@ -31,6 +31,22 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 - **Tópico bruto imutável:** o producer publica o JSON original sem transformar. Chave = MMSI, o que garante ordem por navio dentro da partição.
 - **Producer idempotente** (`acks=all`, `enable.idempotence=true`): retry não gera duplicata no tópico.
 - **Cobertura AIS esparsa** em Santos: navios em movimento chegam a cada 60–90 s. Por isso o mapa vai interpolar a posição entre mensagens (dead reckoning).
+
+## Modelo de dados (ClickHouse)
+
+```
+Kafka ais.raw ─▶ kafka_ais_raw (Kafka Engine, RawBLOB)
+                   └─MV─▶ ais_raw            BRONZE  JSON original + partição/offset (TTL 30 dias)
+                            ├─MV─▶ positions     SILVER  posições tipadas (ReplacingMergeTree por mmsi, ts)
+                            └─MV─▶ ship_static   SILVER  nome, tipo, dimensões, destino (AggregatingMergeTree)
+Views: ships · positions_dedup · latest_positions
+```
+
+- **Bronze imutável:** o JSON é guardado como chegou. Se o parse mudar, a silver é reprocessada a partir da bronze (`INSERT INTO ais.positions SELECT ... FROM ais.ais_raw`), sem depender da retenção do Kafka.
+- **Deduplicação:** o Kafka Engine entrega *at-least-once*; a `positions` é `ReplacingMergeTree` com chave `(mmsi, ts)`, então uma mensagem reentregue some no merge (`positions_dedup` usa `FINAL` para leitura exata).
+- **Dados estáticos em partes:** a classe B manda nome e dimensões em mensagens separadas. `ship_static` usa `anyLast`, que ignora `NULL` — uma mensagem parcial não apaga o que já se sabia do navio.
+- **Valores "indisponível" do AIS viram `NULL`:** velocidade 102,3, rumo 360, proa 511, posição 91/181.
+- Consultas de validação em [`clickhouse/queries/validacao.sql`](clickhouse/queries/validacao.sql).
 
 ## Como rodar
 
@@ -56,7 +72,9 @@ Parar: `docker compose down` (mantém os dados) · `docker compose down -v` (apa
 
 ```
 producer/            WebSocket aisstream.io -> Kafka
-docker-compose.yml   Kafka (KRaft), kafka-init (cria tópicos), Kafbat UI, ClickHouse, producer
+clickhouse/schema/   DDL aplicado pelo clickhouse-init a cada `up` (idempotente)
+clickhouse/queries/  consultas de validação
+docker-compose.yml   Kafka (KRaft), kafka-init, Kafbat UI, ClickHouse, clickhouse-init, producer
 .env.example         variáveis necessárias (sem valores)
 ```
 
