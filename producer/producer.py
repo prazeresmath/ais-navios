@@ -42,7 +42,7 @@ except ImportError:
 
 log = logging.getLogger("ais-producer")
 
-DEFAULT_BBOX = "-24.20,-46.50,-23.85,-46.05"
+DEFAULT_BBOX = "-24.30,-46.50,-23.85,-46.05"
 # Tipos que não descrevem navio nenhum e não devem ir para o tópico
 IGNORED_TYPES = {"SubscriptionConfirmation"}
 

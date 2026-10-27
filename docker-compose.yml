@@ -169,7 +169,7 @@ services:
         condition: service_completed_successfully
     environment:
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:?Defina AISSTREAM_API_KEY no .env}
-      AIS_BBOX: ${AIS_BBOX:--24.20,-46.50,-23.85,-46.05}
+      AIS_BBOX: ${AIS_BBOX:--24.30,-46.50,-23.85,-46.05}
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_TOPIC: ais.raw
 

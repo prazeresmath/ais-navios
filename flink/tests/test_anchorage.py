@@ -17,7 +17,9 @@ sys.path.insert(0, str(JOB_DIR))
 
 from anchorage_logic import AnchorageTracker, Position, Zones, parse_position  # noqa: E402
 
-ZONES = Zones.load(str(JOB_DIR / "zones" / "santos.geojson"))
+# Zonas fixas de teste: as de produção (job/zones/santos.geojson) podem mudar sem quebrar os testes
+TEST_ZONES = Path(__file__).resolve().parent / "zonas_teste.geojson"
+ZONES = Zones.load(str(TEST_ZONES))
 MIN = 60 * 1000
 T0 = 1_792_000_000_000  # horário base qualquer (ms)
 
@@ -140,7 +142,7 @@ def test_job_no_minicluster():
     env.set_python_executable(sys.executable)
     env.add_python_file(str(JOB_DIR))
     stream = env.from_collection(lines, type_info=Types.STRING())
-    out = [json.loads(e) for e in build_pipeline(stream, str(JOB_DIR / "zones" / "santos.geojson")).execute_and_collect()]
+    out = [json.loads(e) for e in build_pipeline(stream, str(TEST_ZONES)).execute_and_collect()]
     by_ship = {}
     for e in out:
         by_ship.setdefault(e["mmsi"], []).append(e["event_type"])

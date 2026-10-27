@@ -20,13 +20,13 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 | 1 | Kafka + ClickHouse no Docker, producer publicando no tópico `ais.raw` | ✅ |
 | 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | ✅ |
 | 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | ✅ |
-| 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | 🔄 (zonas provisórias) |
+| 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | ✅ (zonas v1) |
 | 5 | Métricas no Grafana | ⏳ |
 
 ## Decisões
 
 - **Fonte push (WebSocket), não polling** — streaming de verdade de ponta a ponta.
-- **Recorte:** Porto de Santos + fundeadouro (`-24.20,-46.50` a `-23.85,-46.05`), para capturar a fila de navios esperando para atracar.
+- **Recorte:** Porto de Santos + fundeadouro (`-24.30,-46.50` a `-23.85,-46.05`), para capturar a fila de navios esperando para atracar. O limite sul começou em −24,20 e foi ampliado depois que a análise das posições mostrou navios fundeados encostados na borda.
 - **Kafka em KRaft** (sem ZooKeeper), nó único. O volume é baixo (~13 msg/min no recorte), então o Kafka está superdimensionado de propósito: o objetivo é demonstrar o padrão.
 - **Tópico bruto imutável:** o producer publica o JSON original sem transformar. Chave = MMSI, o que garante ordem por navio dentro da partição.
 - **Producer idempotente** (`acks=all`, `enable.idempotence=true`): retry não gera duplicata no tópico.
@@ -86,7 +86,7 @@ Kafka ais.raw ─▶ PyFlink (DataStream API)
 - **Borda da zona com tolerância de ~200 m** para o navio não "piscar" entrando e saindo quando o GPS oscila.
 - **Estado sobrevive a restart:** checkpoints a cada 60 s num volume; o container `flink-job` é um vigia que resubmete o job a partir do checkpoint mais recente quando ele não está rodando (o cluster não tem alta disponibilidade).
 - **At-least-once + deduplicação no destino:** a tabela `ais.events` é `ReplacingMergeTree` por `(event_type, mmsi, ts)`.
-- **Zonas em GeoJSON** (`flink/job/zones/santos.geojson`), montadas no container: dá para ajustar sem rebuild. As atuais são **provisórias**; serão substituídas por polígonos derivados de onde os navios realmente fundeiam.
+- **Zonas derivadas dos dados** (`flink/job/zones/santos.geojson`, montadas no container): o fundeadouro é a envoltória das posições com status "fundeado" (51 navios) com ~1,2 km de folga; o porto, a envoltória das posições paradas no estuário com ~400 m. Ao trocar as zonas, `scripts/reprocessar-eventos.ps1` recalcula todos os eventos a partir do histórico do Kafka.
 
 ## Como rodar
 

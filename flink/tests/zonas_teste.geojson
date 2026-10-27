@@ -1,0 +1,88 @@
+{
+  "type": "FeatureCollection",
+  "_comment": "Zonas FIXAS para os testes (cópia das zonas provisórias de 26/10/2026). Não mudam quando as zonas de produção mudam.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "fundeadouro_provisorio",
+        "kind": "anchorage",
+        "source": "provisorio"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -46.4,
+              -24.16
+            ],
+            [
+              -46.22,
+              -24.16
+            ],
+            [
+              -46.22,
+              -24.03
+            ],
+            [
+              -46.4,
+              -24.03
+            ],
+            [
+              -46.4,
+              -24.16
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "porto_santos",
+        "kind": "port",
+        "source": "provisorio"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -46.385,
+              -23.905
+            ],
+            [
+              -46.33,
+              -23.905
+            ],
+            [
+              -46.29,
+              -23.96
+            ],
+            [
+              -46.285,
+              -23.995
+            ],
+            [
+              -46.305,
+              -23.995
+            ],
+            [
+              -46.33,
+              -23.965
+            ],
+            [
+              -46.385,
+              -23.935
+            ],
+            [
+              -46.385,
+              -23.905
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
