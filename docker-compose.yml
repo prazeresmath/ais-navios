@@ -1,6 +1,7 @@
 # Kafka (KRaft, nó único) + ClickHouse + producer AIS + Kafbat UI
 # Fase 1: ingestão no tópico ais.raw | Fase 2: ClickHouse consome o tópico (bronze -> silver)
 # Fase 3: live-api consome o tópico e empurra posições para o mapa (http://localhost:8000)
+# Fase 4: Flink detecta eventos de fundeadouro (ais.raw -> ais.events -> ClickHouse)
 #
 #   docker compose up -d --build      sobe tudo
 #   docker compose logs -f producer   acompanha a ingestão
@@ -12,8 +13,32 @@
 #   8080  Kafbat UI (http://localhost:8080)
 #   8123  ClickHouse HTTP (http://localhost:8123/play)
 #   8000  Mapa ao vivo (http://localhost:8000)
+#   8081  Flink Web UI (http://localhost:8081)
 
 name: ais-navios
+
+# Configuração comum dos containers do Flink (Fase 4)
+x-flink: &flink
+  build: ./flink
+  image: ais-navios-flink:latest
+  restart: unless-stopped
+  volumes:
+    - flink-data:/flink-data
+    - ./flink/job/zones:/opt/job/zones:ro      # zonas editáveis sem rebuild (reiniciar o job)
+  environment:
+    KAFKA_BOOTSTRAP: kafka:9092
+    ZONES_FILE: /opt/job/zones/santos.geojson
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: flink-jobmanager
+      rest.address: flink-jobmanager
+      taskmanager.numberOfTaskSlots: 2
+      parallelism.default: 1
+      jobmanager.memory.process.size: 1024m
+      taskmanager.memory.process.size: 1728m
+      state.backend.type: hashmap
+      state.checkpoints.dir: file:///flink-data/checkpoints
+      state.checkpoints.num-retained: 3
+      execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
 
 services:
   kafka:
@@ -66,7 +91,12 @@ services:
           --create --if-not-exists --topic ais.raw \
           --partitions 3 --replication-factor 1 \
           --config retention.ms=604800000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic ais.events \
+          --partitions 1 --replication-factor 1 \
+          --config retention.ms=2592000000
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic ais.raw
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic ais.events
     restart: "no"
 
   kafka-ui:
@@ -158,6 +188,35 @@ services:
       WARMUP_MINUTES: ${WARMUP_MINUTES:-60}
       SHIP_MAX_AGE_H: ${SHIP_MAX_AGE_H:-6}
 
+  flink-jobmanager:
+    <<: *flink
+    command: jobmanager
+    ports:
+      - "8081:8081"
+
+  flink-taskmanager:
+    <<: *flink
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+
+  flink-job:
+    # Vigia: submete o job e o resubmete (do último checkpoint) se ele não estiver rodando
+    <<: *flink
+    entrypoint: ["/opt/submit.sh"]
+    environment:
+      JOBMANAGER: flink-jobmanager:8081
+      KAFKA_BOOTSTRAP: kafka:9092
+      ZONES_FILE: /opt/job/zones/santos.geojson
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+
 volumes:
   kafka-data:
   clickhouse-data:
+  flink-data:

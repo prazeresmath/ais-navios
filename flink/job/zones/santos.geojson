@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "_comment": "ZONAS PROVISÓRIAS (26/10/2026). Retângulo/polígono aproximados só para testar o job. Serão substituídas pelos polígonos derivados dos dados (análise de onde os navios fundeiam). Coordenadas em [lon, lat].",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "fundeadouro_provisorio", "kind": "anchorage", "source": "provisorio" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-46.40, -24.16], [-46.22, -24.16], [-46.22, -24.03], [-46.40, -24.03], [-46.40, -24.16]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "porto_santos", "kind": "port", "source": "provisorio" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-46.385, -23.905], [-46.330, -23.905], [-46.290, -23.960], [-46.285, -23.995], [-46.305, -23.995], [-46.330, -23.965], [-46.385, -23.935], [-46.385, -23.905]]]
+      }
+    }
+  ]
+}

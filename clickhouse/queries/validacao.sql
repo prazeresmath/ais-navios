@@ -59,3 +59,30 @@ SELECT table, formatReadableSize(sum(bytes_on_disk)) AS disco, sum(rows) AS linh
 FROM system.parts
 WHERE database = 'ais' AND active
 GROUP BY table;
+
+-- =============================================================================
+-- Fase 4 — eventos de fundeadouro
+-- =============================================================================
+
+-- 10) Eventos por tipo (o Flink está produzindo?)
+SELECT event_type, count() AS eventos, max(ts) AS ultimo, max(received_at) AS lido_em
+FROM ais.events FINAL
+GROUP BY event_type
+ORDER BY eventos DESC;
+
+-- 11) Consumidor do tópico de eventos
+SELECT table, num_messages_read, last_poll_time, exceptions.text AS erros
+FROM system.kafka_consumers
+WHERE database = 'ais' AND table = 'kafka_ais_events';
+
+-- 12) Navios esperando agora no fundeadouro
+SELECT * FROM ais.waiting_now ORDER BY waiting_min DESC;
+
+-- 13) Esperas concluídas (base da métrica de tempo de espera)
+SELECT * FROM ais.anchorage_waits ORDER BY exit_ts DESC LIMIT 50;
+
+-- 14) Linha do tempo de um navio (troque o MMSI)
+SELECT ts, event_type, zone, wait_s, total_s
+FROM ais.events FINAL
+WHERE mmsi = 352002805
+ORDER BY ts;

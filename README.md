@@ -20,7 +20,7 @@ aisstream.io ─WebSocket─▶ Producer Python ─▶ Kafka (KRaft) ── tóp
 | 1 | Kafka + ClickHouse no Docker, producer publicando no tópico `ais.raw` | ✅ |
 | 2 | Histórico no ClickHouse via Kafka Engine + Materialized View (bronze → silver) | ✅ |
 | 3 | Mapa ao vivo: FastAPI (WebSocket) + MapLibre com interpolação | ✅ |
-| 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | ⏳ |
+| 4 | Eventos no Flink: entrada/saída do fundeadouro, tempo de espera | 🔄 (zonas provisórias) |
 | 5 | Métricas no Grafana | ⏳ |
 
 ## Decisões
@@ -63,6 +63,31 @@ Kafka ais.raw ─▶ live-api (FastAPI) ── estado em memória: última posi�
 - Ícones coloridos por categoria com contorno branco (destacam das boias); filtro por categoria clicando na legenda.
 - Mapa base: [OpenFreeMap](https://openfreemap.org) + camada náutica do [OpenSeaMap](https://www.openseamap.org) (boias, canais, fundeadouros).
 
+## Eventos de fundeadouro (Flink)
+
+```
+Kafka ais.raw ─▶ PyFlink (DataStream API)
+                   parse → watermark (horário do receptor, atraso de 5 min) → key_by(MMSI)
+                   → KeyedProcessFunction: estado por navio + timers de horário do evento
+               ─▶ Kafka ais.events ─▶ ClickHouse ais.events (Kafka Engine + MV)
+                                         views: anchorage_waits · waiting_now
+```
+
+| Evento | Quando |
+|---|---|
+| `anchorage_enter` | entra num polígono de fundeadouro |
+| `wait_start` | parado (< 0,5 nó ou status "fundeado") por ≥ 15 min dentro da zona |
+| `anchorage_exit` | sai do polígono — traz a duração e, se esperou, o tempo de espera |
+| `port_arrival` | entra na zona do porto até 24 h depois de sair do fundeadouro tendo esperado |
+| `signal_lost` | 6 h sem sinal dentro da zona — encerra a sessão sem inventar uma saída |
+
+- **Regras em Python puro** (`flink/job/anchorage_logic.py`), separadas do código do Flink: testadas com pytest e o job inteiro testado num mini-cluster PyFlink local (`RUN_FLINK=1 pytest flink/tests`).
+- **Horário do evento, não do processamento:** o watermark segue o horário do receptor AIS; o `signal_lost` é um timer de event time, então reprocessar o histórico gera os mesmos eventos.
+- **Borda da zona com tolerância de ~200 m** para o navio não "piscar" entrando e saindo quando o GPS oscila.
+- **Estado sobrevive a restart:** checkpoints a cada 60 s num volume; o container `flink-job` é um vigia que resubmete o job a partir do checkpoint mais recente quando ele não está rodando (o cluster não tem alta disponibilidade).
+- **At-least-once + deduplicação no destino:** a tabela `ais.events` é `ReplacingMergeTree` por `(event_type, mmsi, ts)`.
+- **Zonas em GeoJSON** (`flink/job/zones/santos.geojson`), montadas no container: dá para ajustar sem rebuild. As atuais são **provisórias**; serão substituídas por polígonos derivados de onde os navios realmente fundeiam.
+
 ## Como rodar
 
 Pré-requisitos: Docker Desktop e uma API key gratuita do [aisstream.io](https://aisstream.io).
@@ -79,6 +104,7 @@ docker compose logs -f producer
 |---|---|
 | **Mapa ao vivo** | http://localhost:8000 |
 | Kafbat UI (tópicos e mensagens) | http://localhost:8080 |
+| Flink Web UI (job e checkpoints) | http://localhost:8081 |
 | ClickHouse (console SQL) | http://localhost:8123/play |
 | Kafka para clientes no host | `localhost:9094` |
 
@@ -91,7 +117,9 @@ producer/            WebSocket aisstream.io -> Kafka
 clickhouse/schema/   DDL aplicado pelo clickhouse-init a cada `up` (idempotente)
 clickhouse/queries/  consultas de validação
 live-api/            FastAPI: Kafka -> estado em memória -> WebSocket; serve o mapa (static/)
-docker-compose.yml   Kafka (KRaft), kafka-init, Kafbat UI, ClickHouse, clickhouse-init, producer, live-api
+flink/job/           job PyFlink (anchorage_job.py), regras (anchorage_logic.py) e zonas (zones/)
+flink/tests/         testes das regras e do job no mini-cluster
+docker-compose.yml   Kafka (KRaft), kafka-init, Kafbat UI, ClickHouse, clickhouse-init, producer, live-api, Flink (jobmanager, taskmanager, vigia do job)
 .env.example         variáveis necessárias (sem valores)
 ```
 
