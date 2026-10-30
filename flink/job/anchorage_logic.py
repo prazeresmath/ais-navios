@@ -10,6 +10,14 @@ Eventos emitidos (campo event_type):
     anchorage_exit   saiu do polígono (duração total e, se esperou, tempo de espera)
     port_arrival     entrou na zona do porto depois de ter esperado no fundeadouro
     signal_lost      ficou LOST_AFTER_S sem sinal dentro da zona; encerra a sessão
+
+Incerteza (a cobertura AIS tem buracos e a coleta pode parar):
+    - A saída só é vista quando o navio aparece FORA da zona. Por isso o
+      anchorage_exit traz last_inside_ts_ms (última vez visto dentro) e a espera
+      vira um intervalo: wait_min_s (até a última vez dentro) e wait_s (até ser
+      visto fora, o máximo). exit_gap_s = tamanho desse "buraco".
+    - start_censored = True quando o navio já estava parado no primeiro
+      avistamento: a espera começou antes de o vermos e está subestimada.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ WAIT_MIN_S = 15 * 60          # parado por pelo menos 15 min = começou a espera
 LOST_AFTER_S = 6 * 3600       # 6 h sem sinal dentro da zona = sessão encerrada
 ARRIVAL_WINDOW_S = 24 * 3600  # chegada ao porto conta se ocorrer até 24 h depois de sair do fundeadouro
 ZONE_STICKY_DEG = 0.002       # ~200 m de tolerância para não "piscar" na borda da zona
+FIRST_SIGHT_GAP_S = 60 * 60   # sem nenhuma posição do navio há 1 h = "primeiro avistamento"
 
 
 # ------------------------------------------------------------------ posição
@@ -142,12 +151,17 @@ def _event(event_type: str, pos_or_mmsi, ts_ms: int, zone: str, **extra) -> dict
 
 def _exit_event(pos: Position, session: dict) -> dict:
     wait_start = session.get("wait_start_ts")
+    last_inside = session["last_ts"]
     return _event(
         "anchorage_exit", pos, pos.ts_ms, session["zone"],
         enter_ts_ms=session["enter_ts"],
         wait_start_ts_ms=wait_start,
+        last_inside_ts_ms=last_inside,
         duration_s=(pos.ts_ms - session["enter_ts"]) // 1000,
         wait_s=(pos.ts_ms - wait_start) // 1000 if wait_start else None,
+        wait_min_s=(last_inside - wait_start) // 1000 if wait_start else None,
+        exit_gap_s=(pos.ts_ms - last_inside) // 1000,
+        start_censored=bool(session.get("start_censored")),
     )
 
 
@@ -162,8 +176,10 @@ class AnchorageTracker:
     def process(self, state: dict | None, pos: Position, zone: tuple[str, str] | None):
         """Devolve (eventos, novo_estado, horário_do_próximo_timer)."""
         state = dict(state or {})
-        if state.get("last_ts") is not None and pos.ts_ms <= state["last_ts"]:
+        prev_ts = state.get("last_ts")
+        if prev_ts is not None and pos.ts_ms <= prev_ts:
             return [], state, self._next_timer(state)  # repetida ou fora de ordem
+        first_sight = prev_ts is None or pos.ts_ms - prev_ts > FIRST_SIGHT_GAP_S * 1000
         state["last_ts"] = pos.ts_ms
         events: list[dict] = []
         session = state.get("session")
@@ -179,7 +195,9 @@ class AnchorageTracker:
                 events.append(_exit_event(pos, session))
                 session = None
             if session is None:
-                session = {"zone": name, "enter_ts": pos.ts_ms, "stopped_since": None, "wait_start_ts": None}
+                session = {"zone": name, "enter_ts": pos.ts_ms, "stopped_since": None, "wait_start_ts": None,
+                           # já parado no primeiro avistamento: a espera começou antes de o vermos
+                           "start_censored": bool(first_sight and pos.stopped)}
                 pending = None  # voltou a fundear: a espera anterior não terminou no porto
                 events.append(_event("anchorage_enter", pos, pos.ts_ms, name))
             if pos.stopped:
@@ -187,7 +205,8 @@ class AnchorageTracker:
                 if session["wait_start_ts"] is None and pos.ts_ms - session["stopped_since"] >= WAIT_MIN_S * 1000:
                     session["wait_start_ts"] = session["stopped_since"]
                     events.append(_event("wait_start", pos, session["stopped_since"], name,
-                                         enter_ts_ms=session["enter_ts"]))
+                                         enter_ts_ms=session["enter_ts"],
+                                         start_censored=bool(session.get("start_censored"))))
             else:
                 session["stopped_since"] = None
             session["last_ts"] = pos.ts_ms
@@ -196,7 +215,8 @@ class AnchorageTracker:
                 events.append(_exit_event(pos, session))
                 if session.get("wait_start_ts"):
                     pending = {"zone": session["zone"], "wait_start_ts": session["wait_start_ts"],
-                               "exit_ts": pos.ts_ms}
+                               "exit_ts": pos.ts_ms, "last_inside_ts": session["last_ts"],
+                               "start_censored": bool(session.get("start_censored"))}
                 session = None
             if zone and zone[1] == "port" and pending:
                 events.append(_event(
@@ -204,8 +224,14 @@ class AnchorageTracker:
                     from_zone=pending["zone"],
                     wait_start_ts_ms=pending["wait_start_ts"],
                     exit_ts_ms=pending["exit_ts"],
+                    last_inside_ts_ms=pending.get("last_inside_ts"),
                     wait_s=(pending["exit_ts"] - pending["wait_start_ts"]) // 1000,
+                    wait_min_s=((pending["last_inside_ts"] - pending["wait_start_ts"]) // 1000
+                                if pending.get("last_inside_ts") else None),
+                    exit_gap_s=((pending["exit_ts"] - pending["last_inside_ts"]) // 1000
+                                if pending.get("last_inside_ts") else None),
                     total_s=(pos.ts_ms - pending["wait_start_ts"]) // 1000,
+                    start_censored=bool(pending.get("start_censored")),
                 ))
                 pending = None
 
@@ -223,8 +249,11 @@ class AnchorageTracker:
                 "signal_lost", mmsi, session["last_ts"], session["zone"],
                 enter_ts_ms=session["enter_ts"],
                 wait_start_ts_ms=wait_start,
+                last_inside_ts_ms=session["last_ts"],
                 duration_s=(session["last_ts"] - session["enter_ts"]) // 1000,
                 wait_s=(session["last_ts"] - wait_start) // 1000 if wait_start else None,
+                wait_min_s=(session["last_ts"] - wait_start) // 1000 if wait_start else None,
+                start_censored=bool(session.get("start_censored")),
             ))
             session = None
         if pending and timer_ts >= pending["exit_ts"] + ARRIVAL_WINDOW_S * 1000:

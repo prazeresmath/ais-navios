@@ -65,6 +65,13 @@ def test_espera_completa_ate_o_porto():
     assert wait["ts_ms"] == T0 + 5 * MIN                            # espera começa quando parou
     assert exit_["wait_s"] == (6 * 60 + 10 - 5) * 60
     assert arrival["from_zone"] == "fundeadouro_provisorio"
+    # espera como intervalo: último ponto dentro aos 6h-1min (range(5, 360, 3) termina em 359)
+    assert exit_["last_inside_ts_ms"] == T0 + 359 * MIN
+    assert exit_["wait_min_s"] == (359 - 5) * 60
+    assert exit_["exit_gap_s"] == (6 * 60 + 10 - 359) * 60
+    assert arrival["wait_min_s"] == exit_["wait_min_s"] and arrival["exit_gap_s"] == exit_["exit_gap_s"]
+    # entrou navegando: início observado, não censurado
+    assert exit_["start_censored"] is False and arrival["start_censored"] is False
     assert arrival["total_s"] == (6 * 60 + 40 - 5) * 60
     assert state["session"] is None and state["pending"] is None
 
@@ -149,3 +156,21 @@ def test_job_no_minicluster():
     assert by_ship[111] == ["anchorage_enter", "wait_start", "anchorage_exit", "port_arrival"]
     assert by_ship[222] == ["anchorage_enter", "wait_start", "signal_lost"]
     assert 333 not in by_ship
+
+
+def test_ja_parado_no_primeiro_avistamento_e_censurado():
+    events, _ = run([pos(0, ANCHOR), pos(20, ANCHOR), pos(40, SEA, sog=8, nav=0)])
+    assert types(events) == ["anchorage_enter", "wait_start", "anchorage_exit"]
+    assert events[1]["start_censored"] is True and events[2]["start_censored"] is True
+
+
+def test_buraco_de_cobertura_vira_intervalo():
+    # visto parado até o minuto 60; some; reaparece fora 10 h depois
+    seq = [pos(0, ANCHOR, sog=2, nav=0), pos(5, ANCHOR), pos(60, ANCHOR), pos(660, SEA, sog=9, nav=0)]
+    events, _ = run(seq)
+    exit_ = events[-1]
+    assert exit_["event_type"] == "anchorage_exit"
+    assert exit_["wait_min_s"] == 55 * 60            # certeza: esperou pelo menos 55 min
+    assert exit_["wait_s"] == 655 * 60               # no máximo ~10,9 h
+    assert exit_["exit_gap_s"] == 600 * 60           # 10 h sem saber onde estava
+

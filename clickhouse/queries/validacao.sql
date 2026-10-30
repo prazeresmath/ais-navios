@@ -79,7 +79,19 @@ WHERE database = 'ais' AND table = 'kafka_ais_events';
 SELECT * FROM ais.waiting_now ORDER BY waiting_min DESC;
 
 -- 13) Esperas concluídas (base da métrica de tempo de espera)
-SELECT * FROM ais.anchorage_waits ORDER BY exit_ts DESC LIMIT 50;
+--     wait_min_h..wait_max_h = intervalo; complete = início observado e saída sem buraco > 1 h
+SELECT name, category, wait_start_ts, last_inside_ts, exit_ts,
+       wait_min_h, wait_max_h, exit_gap_h, start_censored, complete, total_s
+FROM ais.anchorage_waits ORDER BY exit_ts DESC LIMIT 50;
+
+-- 15) Resumo da métrica de espera (todas x só completas)
+SELECT
+    count()                                        AS esperas,
+    countIf(complete)                              AS completas,
+    round(median(wait_min_h), 1)                   AS mediana_min_h,
+    round(median(wait_max_h), 1)                   AS mediana_max_h,
+    round(medianIf(wait_max_h, complete), 1)       AS mediana_completas_h
+FROM ais.anchorage_waits;
 
 -- 14) Linha do tempo de um navio (troque o MMSI)
 SELECT ts, event_type, zone, wait_s, total_s

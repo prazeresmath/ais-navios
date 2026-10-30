@@ -85,6 +85,8 @@ Kafka ais.raw ─▶ PyFlink (DataStream API)
 - **Horário do evento, não do processamento:** o watermark segue o horário do receptor AIS; o `signal_lost` é um timer de event time, então reprocessar o histórico gera os mesmos eventos.
 - **Borda da zona com tolerância de ~200 m** para o navio não "piscar" entrando e saindo quando o GPS oscila.
 - **Estado sobrevive a restart:** checkpoints a cada 60 s num volume; o container `flink-job` é um vigia que resubmete o job a partir do checkpoint mais recente quando ele não está rodando (o cluster não tem alta disponibilidade).
+- **Espera como intervalo, não como número:** a saída do fundeadouro só é vista quando o navio aparece fora dele — se a cobertura AIS (ou a coleta) teve um buraco, a saída real ficou em algum ponto desse buraco. Por isso cada espera tem `wait_min` (até a última vez visto dentro) e `wait_max` (até a primeira vez visto fora), além de `exit_gap` (o tamanho do buraco).
+- **Censura à esquerda marcada:** se o navio já estava parado no primeiro avistamento (`start_censored`), a espera começou antes de o vermos. A view `anchorage_waits` tem a coluna `complete` (início observado e saída com buraco ≤ 1 h) para separar esperas confiáveis nas métricas.
 - **At-least-once + deduplicação no destino:** a tabela `ais.events` é `ReplacingMergeTree` por `(event_type, mmsi, ts)`.
 - **Zonas derivadas dos dados** (`flink/job/zones/santos.geojson`, montadas no container): o fundeadouro é a envoltória das posições com status "fundeado" (51 navios) com ~1,2 km de folga; o porto, a envoltória das posições paradas no estuário com ~400 m. Ao trocar as zonas, `scripts/reprocessar-eventos.ps1` recalcula todos os eventos a partir do histórico do Kafka.
 
