@@ -18,6 +18,12 @@ Incerteza (a cobertura AIS tem buracos e a coleta pode parar):
       visto fora, o máximo). exit_gap_s = tamanho desse "buraco".
     - start_censored = True quando o navio já estava parado no primeiro
       avistamento: a espera começou antes de o vermos e está subestimada.
+
+Cobertura (janela cega diária no fundeadouro de Santos, ~10h–17h UTC):
+    O signal_lost não conta horas de relógio, conta horas COBERTAS: horas em
+    que a zona recebeu pelo menos COVERED_MIN_POSITIONS posições (de qualquer
+    navio). Se o receptor some, ninguém é visto e o relógio do signal_lost
+    para. Teto de LOST_MAX_S para nenhuma sessão ficar aberta para sempre.
 """
 
 from __future__ import annotations
@@ -25,12 +31,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 
 POSITION_TYPES = {"PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport"}
 
 STOP_KN = 0.5                 # abaixo disso o navio está parado
 WAIT_MIN_S = 15 * 60          # parado por pelo menos 15 min = começou a esperar
-LOST_AFTER_S = 6 * 3600       # 6 h sem sinal dentro da zona = sessão encerrada
+LOST_AFTER_S = 6 * 3600       # 6 h COBERTAS sem sinal dentro da zona = sessão encerrada
+LOST_MAX_S = 48 * 3600        # teto: 48 h de relógio sem sinal encerra mesmo sem cobertura
+COVERED_MIN_POSITIONS = 15    # hora "coberta" = zona recebeu >= 15 posições (cegas: 2–10; normais: 20–124)
+HOUR_MS = 3600 * 1000
 ARRIVAL_WINDOW_S = 24 * 3600  # chegada ao porto conta se ocorrer até 24 h depois de sair do fundeadouro
 ZONE_STICKY_DEG = 0.002       # ~200 m de tolerância para não "piscar" na borda da zona
 FIRST_SIGHT_GAP_S = 60 * 60   # sem nenhuma posição do navio há 1 h = "primeiro avistamento"
@@ -137,6 +147,28 @@ class Zones:
         return None
 
 
+# ------------------------------------------------------------------ cobertura
+
+
+def hour_start(ts_ms: int) -> int:
+    return ts_ms - ts_ms % HOUR_MS
+
+
+# (zona, início da hora em ms) -> nº de posições na zona naquela hora (0 se ninguém foi visto)
+CoverageLookup = Callable[[str, int], int]
+
+
+def covered_hours(coverage: CoverageLookup, zone: str, after_ts_ms: int, until_ts_ms: int) -> int:
+    """Horas cheias cobertas depois de after_ts_ms (exclui a hora em andamento) que terminam até until_ts_ms."""
+    count = 0
+    h = hour_start(after_ts_ms) + HOUR_MS
+    while h + HOUR_MS <= until_ts_ms:
+        if coverage(zone, h) >= COVERED_MIN_POSITIONS:
+            count += 1
+        h += HOUR_MS
+    return count
+
+
 # ------------------------------------------------------------------ máquina de estados
 
 
@@ -169,7 +201,8 @@ class AnchorageTracker:
     """
     Estado por navio (um dict serializável em JSON):
         last_ts  último horário processado
-        session  sessão aberta no fundeadouro: zone, enter_ts, stopped_since, wait_start_ts, last_ts
+        session  sessão aberta no fundeadouro: zone, enter_ts, stopped_since, wait_start_ts, last_ts,
+                 check_at (próxima checagem do signal_lost, quando reagendada por falta de cobertura)
         pending  navio que esperou e saiu do fundeadouro, aguardando chegar ao porto
     """
 
@@ -210,6 +243,7 @@ class AnchorageTracker:
             else:
                 session["stopped_since"] = None
             session["last_ts"] = pos.ts_ms
+            session.pop("check_at", None)  # visto de novo: o relógio do signal_lost recomeça
         else:
             if session:
                 events.append(_exit_event(pos, session))
@@ -238,24 +272,42 @@ class AnchorageTracker:
         state["session"], state["pending"] = session, pending
         return events, state, self._next_timer(state)
 
-    def on_timer(self, state: dict | None, mmsi: int, timer_ts: int):
-        """Timer de horário do evento: encerra sessão sem sinal e limpa pendência vencida."""
+    def on_timer(self, state: dict | None, mmsi: int, timer_ts: int, coverage: CoverageLookup | None = None):
+        """
+        Timer de horário do evento: encerra sessão sem sinal e limpa pendência vencida.
+
+        coverage=None conta horas de relógio (comportamento simples, usado nos testes antigos).
+        Com coverage, só horas cobertas contam; se ainda não há horas suficientes, o timer é
+        reagendado para a próxima virada de hora (decisão preguiçosa: não depende da ordem em
+        que a contagem de cobertura e o timer chegam).
+        """
         state = dict(state or {})
         events: list[dict] = []
         session, pending = state.get("session"), state.get("pending")
         if session and timer_ts >= session["last_ts"] + LOST_AFTER_S * 1000:
-            wait_start = session.get("wait_start_ts")
-            events.append(_event(
-                "signal_lost", mmsi, session["last_ts"], session["zone"],
-                enter_ts_ms=session["enter_ts"],
-                wait_start_ts_ms=wait_start,
-                last_inside_ts_ms=session["last_ts"],
-                duration_s=(session["last_ts"] - session["enter_ts"]) // 1000,
-                wait_s=(session["last_ts"] - wait_start) // 1000 if wait_start else None,
-                wait_min_s=(session["last_ts"] - wait_start) // 1000 if wait_start else None,
-                start_censored=bool(session.get("start_censored")),
-            ))
-            session = None
+            last = session["last_ts"]
+            if coverage is None:
+                covered, lost = None, True
+            else:
+                covered = covered_hours(coverage, session["zone"], last, timer_ts)
+                lost = covered >= LOST_AFTER_S // 3600 or timer_ts - last >= LOST_MAX_S * 1000
+            if lost:
+                wait_start = session.get("wait_start_ts")
+                events.append(_event(
+                    "signal_lost", mmsi, last, session["zone"],
+                    enter_ts_ms=session["enter_ts"],
+                    wait_start_ts_ms=wait_start,
+                    last_inside_ts_ms=last,
+                    duration_s=(last - session["enter_ts"]) // 1000,
+                    wait_s=(last - wait_start) // 1000 if wait_start else None,
+                    wait_min_s=(last - wait_start) // 1000 if wait_start else None,
+                    start_censored=bool(session.get("start_censored")),
+                    covered_gap_h=covered,
+                ))
+                session = None
+            else:
+                session = dict(session)
+                session["check_at"] = min(hour_start(timer_ts) + HOUR_MS, last + LOST_MAX_S * 1000)
         if pending and timer_ts >= pending["exit_ts"] + ARRIVAL_WINDOW_S * 1000:
             pending = None
         state["session"], state["pending"] = session, pending
@@ -264,7 +316,7 @@ class AnchorageTracker:
     @staticmethod
     def _next_timer(state: dict) -> int | None:
         if state.get("session"):
-            return state["session"]["last_ts"] + LOST_AFTER_S * 1000
+            return state["session"].get("check_at") or state["session"]["last_ts"] + LOST_AFTER_S * 1000
         if state.get("pending"):
             return state["pending"]["exit_ts"] + ARRIVAL_WINDOW_S * 1000
         return None

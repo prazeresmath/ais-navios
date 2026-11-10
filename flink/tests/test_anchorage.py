@@ -15,7 +15,7 @@ import pytest
 JOB_DIR = Path(__file__).resolve().parents[1] / "job"
 sys.path.insert(0, str(JOB_DIR))
 
-from anchorage_logic import AnchorageTracker, Position, Zones, parse_position  # noqa: E402
+from anchorage_logic import HOUR_MS, LOST_MAX_S, AnchorageTracker, Position, Zones, hour_start, parse_position  # noqa: E402
 
 # Zonas fixas de teste: as de produção (job/zones/santos.geojson) podem mudar sem quebrar os testes
 TEST_ZONES = Path(__file__).resolve().parent / "zonas_teste.geojson"
@@ -123,39 +123,66 @@ def test_parse_posicao_real():
     assert parse_position('{"MessageType":"ShipStaticData"}') is None
 
 
-@pytest.mark.skipif(not os.environ.get("RUN_FLINK"), reason="defina RUN_FLINK=1 para rodar no mini-cluster PyFlink")
-def test_job_no_minicluster():
+def _raw(minute, where, sog, nav, mmsi):
+    from datetime import datetime, timezone
+    lat, lon = where
+    t = datetime.fromtimestamp((T0 + minute * MIN) / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f") + "000 +0000 UTC"
+    return json.dumps({"MessageType": "PositionReport", "MetaData": {"MMSI": mmsi, "time_utc": t},
+                       "Message": {"PositionReport": {"Latitude": lat, "Longitude": lon, "Sog": sog, "NavigationalStatus": nav}}})
+
+
+def _run_job(lines):
     from pyflink.common import Types
     from pyflink.datastream import StreamExecutionEnvironment
 
     from anchorage_job import build_pipeline
 
-    def raw(minute, where, sog, nav, mmsi):
-        lat, lon = where
-        from datetime import datetime, timezone
-        t = datetime.fromtimestamp((T0 + minute * MIN) / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f") + "000 +0000 UTC"
-        return json.dumps({"MessageType": "PositionReport", "MetaData": {"MMSI": mmsi, "time_utc": t},
-                           "Message": {"PositionReport": {"Latitude": lat, "Longitude": lon, "Sog": sog, "NavigationalStatus": nav}}})
-
-    lines = [raw(0, ANCHOR, 3.0, 0, 111)]
-    lines += [raw(m, ANCHOR, 0.1, 1, 111) for m in range(5, 120, 5)]
-    lines += [raw(125, SEA, 8, 0, 111), raw(150, PORT, 4, 0, 111)]
-    lines += [raw(0, ANCHOR, 0.1, 1, 222), raw(20, ANCHOR, 0.1, 1, 222)]   # 222 some: deve gerar signal_lost
-    lines += [raw(m, PORT, 5, 0, 333) for m in range(0, 7 * 60, 30)]        # 333 só no porto; avança o watermark
-    lines.sort(key=lambda s: json.loads(s)["MetaData"]["time_utc"])
-
+    lines = sorted(lines, key=lambda s: json.loads(s)["MetaData"]["time_utc"])
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
     env.set_python_executable(sys.executable)
     env.add_python_file(str(JOB_DIR))
     stream = env.from_collection(lines, type_info=Types.STRING())
     out = [json.loads(e) for e in build_pipeline(stream, str(TEST_ZONES)).execute_and_collect()]
-    by_ship = {}
+    by_ship, lost, coverage = {}, {}, {}
     for e in out:
-        by_ship.setdefault(e["mmsi"], []).append(e["event_type"])
+        if e["event_type"] == "zone_coverage":
+            coverage[e["ts_ms"]] = e["positions"]
+        else:
+            by_ship.setdefault(e["mmsi"], []).append(e["event_type"])
+            if e["event_type"] == "signal_lost":
+                lost[e["mmsi"]] = e
+    return by_ship, lost, coverage
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_FLINK"), reason="defina RUN_FLINK=1 para rodar no mini-cluster PyFlink")
+def test_job_no_minicluster():
+    lines = [_raw(0, ANCHOR, 3.0, 0, 111)]
+    lines += [_raw(m, ANCHOR, 0.1, 1, 111) for m in range(5, 120, 5)]
+    lines += [_raw(125, SEA, 8, 0, 111), _raw(150, PORT, 4, 0, 111)]
+    lines += [_raw(0, ANCHOR, 0.1, 1, 222), _raw(20, ANCHOR, 0.1, 1, 222)]   # 222 some: deve gerar signal_lost
+    lines += [_raw(m, ANCHOR, 0.1, 1, 444) for m in range(0, 10 * 60, 3)]   # 444 fundeado: zona coberta (20 pos/h)
+    lines += [_raw(m, PORT, 5, 0, 333) for m in range(0, 11 * 60, 30)]      # 333 só no porto; avança o watermark
+    by_ship, lost, coverage = _run_job(lines)
     assert by_ship[111] == ["anchorage_enter", "wait_start", "anchorage_exit", "port_arrival"]
     assert by_ship[222] == ["anchorage_enter", "wait_start", "signal_lost"]
+    assert lost[222]["covered_gap_h"] == 6                                 # perdido por 6 h cobertas
+    # no fim da entrada o watermark vai ao infinito e todo timer dispara: o 444 cai pelo teto de 48 h
+    assert by_ship[444] == ["anchorage_enter", "wait_start", "signal_lost"]
+    assert lost[444]["covered_gap_h"] == 0
     assert 333 not in by_ship
+    assert coverage and max(coverage.values()) >= 20                      # contagem por hora chegou à saída
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_FLINK"), reason="defina RUN_FLINK=1 para rodar no mini-cluster PyFlink")
+def test_job_sem_cobertura_nao_perde_o_navio():
+    # ninguém mais é visto no fundeadouro (janela cega): as 6 h de relógio passam sem signal_lost.
+    # No fim da entrada o watermark vai ao infinito e o 222 só cai pelo teto de 48 h (0 horas cobertas).
+    lines = [_raw(0, ANCHOR, 0.1, 1, 222), _raw(20, ANCHOR, 0.1, 1, 222)]
+    lines += [_raw(m, PORT, 5, 0, 333) for m in range(0, 11 * 60, 30)]
+    by_ship, lost, _ = _run_job(lines)
+    assert by_ship[222] == ["anchorage_enter", "wait_start", "signal_lost"]
+    assert lost[222]["covered_gap_h"] == 0
 
 
 def test_ja_parado_no_primeiro_avistamento_e_censurado():
@@ -174,3 +201,66 @@ def test_buraco_de_cobertura_vira_intervalo():
     assert exit_["wait_s"] == 655 * 60               # no máximo ~10,9 h
     assert exit_["exit_gap_s"] == 600 * 60           # 10 h sem saber onde estava
 
+
+# ------------------------------------------------------------------ cobertura (janela cega)
+
+
+def _drive_timers(tracker, state, coverage, until_ms, mmsi=111):
+    """Dispara os timers em sequência, como o Flink faria com o watermark avançando até until_ms."""
+    events, fired = [], []
+    nxt = tracker._next_timer(state)
+    while nxt is not None and nxt <= until_ms:
+        fired.append(nxt)
+        evs, state, nxt = tracker.on_timer(state, mmsi, nxt, coverage)
+        events += evs
+    return events, state, fired
+
+
+def test_janela_cega_nao_gera_signal_lost_e_a_espera_continua():
+    tracker = AnchorageTracker()
+    events, state = run([pos(0, ANCHOR, sog=2, nav=0), pos(5, ANCHOR), pos(30, ANCHOR)], tracker)
+    blind = lambda zone, hour: 3                       # noqa: E731 — zona sem cobertura (3 posições/h)
+    evs, state, fired = _drive_timers(tracker, state, blind, T0 + 10 * 60 * MIN)
+    assert evs == [] and len(fired) > 1                # reagendou a checagem de hora em hora
+    assert state["session"] is not None
+    # reaparece parado 10 h depois e sai: mesma sessão, espera inteira, sem censura
+    more, state = [], state
+    for p in [pos(600, ANCHOR), pos(640, SEA, sog=8, nav=0)]:
+        cur = state["session"]
+        zone = ZONES.zone_of(p.lat, p.lon, current=cur["zone"] if cur else None)
+        e, state, _ = tracker.process(state, p, zone)
+        more += e
+    assert types(more) == ["anchorage_exit"]
+    assert more[0]["wait_s"] == (640 - 5) * 60 and more[0]["start_censored"] is False
+
+
+def test_sinal_perdido_com_cobertura_conta_horas_cobertas():
+    tracker = AnchorageTracker()
+    _, state = run([pos(0, ANCHOR), pos(30, ANCHOR)], tracker)
+    last = T0 + 30 * MIN
+    covered = lambda zone, hour: 40                    # noqa: E731
+    evs, state, fired = _drive_timers(tracker, state, covered, last + 12 * HOUR_MS)
+    assert types(evs) == ["signal_lost"]
+    assert fired[-1] == hour_start(last) + 7 * HOUR_MS  # 6 horas cheias depois da hora do último sinal
+    assert evs[0]["ts_ms"] == last and evs[0]["covered_gap_h"] == 6
+    assert state["session"] is None
+
+
+def test_cobertura_parcial_so_conta_horas_cobertas():
+    tracker = AnchorageTracker()
+    _, state = run([pos(0, ANCHOR), pos(30, ANCHOR)], tracker)
+    first = hour_start(T0 + 30 * MIN) + HOUR_MS
+    blind_hours = {first + i * HOUR_MS for i in range(8)}              # 8 h cegas logo depois
+    cov = lambda zone, hour: 3 if hour in blind_hours else 40          # noqa: E731
+    evs, _, fired = _drive_timers(tracker, state, cov, T0 + 30 * HOUR_MS)
+    assert types(evs) == ["signal_lost"]
+    assert fired[-1] == first + 14 * HOUR_MS                           # 8 cegas + 6 cobertas
+
+
+def test_teto_de_48h_sem_cobertura():
+    tracker = AnchorageTracker()
+    _, state = run([pos(0, ANCHOR), pos(30, ANCHOR)], tracker)
+    last = T0 + 30 * MIN
+    evs, _, fired = _drive_timers(tracker, state, lambda zone, hour: 0, last + 72 * HOUR_MS)
+    assert types(evs) == ["signal_lost"] and evs[0]["covered_gap_h"] == 0
+    assert fired[-1] == last + LOST_MAX_S * 1000

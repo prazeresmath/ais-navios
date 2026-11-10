@@ -79,9 +79,9 @@ WHERE database = 'ais' AND table = 'kafka_ais_events';
 SELECT * FROM ais.waiting_now ORDER BY waiting_min DESC;
 
 -- 13) Esperas concluídas (base da métrica de tempo de espera)
---     wait_min_h..wait_max_h = intervalo; complete = início observado e saída sem buraco > 1 h
+--     wait_min_h..wait_max_h = intervalo; complete = início observado e no máximo 1 h COBERTA sem ver a saída
 SELECT name, category, wait_start_ts, last_inside_ts, exit_ts,
-       wait_min_h, wait_max_h, exit_gap_h, start_censored, complete, total_s
+       wait_min_h, wait_max_h, exit_gap_h, exit_gap_covered_h, start_censored, complete, total_s
 FROM ais.anchorage_waits ORDER BY exit_ts DESC LIMIT 50;
 
 -- 15) Resumo da métrica de espera (todas x só completas)
@@ -98,3 +98,20 @@ SELECT ts, event_type, zone, wait_s, total_s
 FROM ais.events FINAL
 WHERE mmsi = 352002805
 ORDER BY ts;
+
+-- =============================================================================
+-- Cobertura do fundeadouro (contada pelo Flink)
+-- =============================================================================
+
+-- 16) Cobertura por hora (hora coberta = >= 15 posições; a janela cega aparece como covered = false)
+SELECT zone, hour, positions, covered
+FROM ais.anchorage_coverage
+WHERE hour >= now() - INTERVAL 3 DAY
+ORDER BY zone, hour;
+
+-- 17) signal_lost por hora do último sinal: covered_gap_h = 6 (perdido de verdade) x 0 (teto de 48 h)
+SELECT toHour(ts) AS hora_ultimo_sinal_utc, count() AS signal_lost,
+       countIf(covered_gap_h >= 6) AS por_cobertura, countIf(covered_gap_h < 6) AS pelo_teto
+FROM ais.events FINAL
+WHERE event_type = 'signal_lost'
+GROUP BY hora_ultimo_sinal_utc ORDER BY hora_ultimo_sinal_utc;

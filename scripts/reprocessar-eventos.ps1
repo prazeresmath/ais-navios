@@ -3,7 +3,7 @@
 #   1. para o vigia e cancela o job do Flink
 #   2. arquiva os checkpoints (o estado antigo usa nomes de zona antigos)
 #   3. volta o consumer group do Flink para o início do tópico ais.raw
-#   4. esvazia a tabela ais.events no ClickHouse
+#   4. esvazia as tabelas ais.events e ais.zone_coverage no ClickHouse
 #   5. sobe o vigia: sem checkpoint, o job relê todo o histórico que o Kafka ainda guarda (7 dias)
 #
 # Uso (na pasta do repo):  powershell -ExecutionPolicy Bypass -File scripts\reprocessar-eventos.ps1
@@ -27,8 +27,8 @@ Step "Voltando o consumer group flink-anchorage para o início de ais.raw"
 Start-Sleep -Seconds 5
 docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group flink-anchorage --topic ais.raw --reset-offsets --to-earliest --execute
 
-Step "Esvaziando ais.events no ClickHouse"
-"TRUNCATE TABLE ais.events" | docker compose exec -T clickhouse bash -c 'clickhouse-client --user $CLICKHOUSE_USER --password $CLICKHOUSE_PASSWORD'
+Step "Esvaziando ais.events e ais.zone_coverage no ClickHouse"
+"TRUNCATE TABLE ais.events; TRUNCATE TABLE IF EXISTS ais.zone_coverage" | docker compose exec -T clickhouse bash -c 'clickhouse-client --multiquery --user $CLICKHOUSE_USER --password $CLICKHOUSE_PASSWORD'
 
 Step "Subindo o vigia (primeira execução, sem checkpoint)"
 docker compose up -d flink-job

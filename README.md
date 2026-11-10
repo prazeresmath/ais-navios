@@ -67,10 +67,12 @@ Kafka ais.raw ─▶ live-api (FastAPI) ── estado em memória: última posi�
 
 ```
 Kafka ais.raw ─▶ PyFlink (DataStream API)
-                   parse → watermark (horário do receptor, atraso de 5 min) → key_by(MMSI)
-                   → KeyedProcessFunction: estado por navio + timers de horário do evento
-               ─▶ Kafka ais.events ─▶ ClickHouse ais.events (Kafka Engine + MV)
-                                         views: anchorage_waits · waiting_now
+                   parse → watermark (horário do receptor, atraso de 5 min)
+                   ├─ key_by(zona) → posições por hora em cada fundeadouro ──broadcast──┐
+                   └─ key_by(MMSI) → KeyedBroadcastProcessFunction: estado por navio,  ◀┘
+                                     timers de horário do evento, cobertura da zona
+               ─▶ Kafka ais.events ─▶ ClickHouse ais.events + ais.zone_coverage (Kafka Engine + MV)
+                                         views: anchorage_waits · waiting_now · anchorage_coverage
 ```
 
 | Evento | Quando |
@@ -79,14 +81,16 @@ Kafka ais.raw ─▶ PyFlink (DataStream API)
 | `wait_start` | parado (< 0,5 nó ou status "fundeado") por ≥ 15 min dentro da zona |
 | `anchorage_exit` | sai do polígono — traz a duração e, se esperou, o tempo de espera |
 | `port_arrival` | entra na zona do porto até 24 h depois de sair do fundeadouro tendo esperado |
-| `signal_lost` | 6 h sem sinal dentro da zona — encerra a sessão sem inventar uma saída |
+| `signal_lost` | 6 h **cobertas** sem sinal dentro da zona (ou 48 h de relógio) — encerra a sessão sem inventar uma saída |
 
 - **Regras em Python puro** (`flink/job/anchorage_logic.py`), separadas do código do Flink: testadas com pytest e o job inteiro testado num mini-cluster PyFlink local (`RUN_FLINK=1 pytest flink/tests`).
 - **Horário do evento, não do processamento:** o watermark segue o horário do receptor AIS; o `signal_lost` é um timer de event time, então reprocessar o histórico gera os mesmos eventos.
 - **Borda da zona com tolerância de ~200 m** para o navio não "piscar" entrando e saindo quando o GPS oscila.
 - **Estado sobrevive a restart:** checkpoints a cada 60 s num volume; o container `flink-job` é um vigia que resubmete o job a partir do checkpoint mais recente quando ele não está rodando (o cluster não tem alta disponibilidade).
 - **Espera como intervalo, não como número:** a saída do fundeadouro só é vista quando o navio aparece fora dele — se a cobertura AIS (ou a coleta) teve um buraco, a saída real ficou em algum ponto desse buraco. Por isso cada espera tem `wait_min` (até a última vez visto dentro) e `wait_max` (até a primeira vez visto fora), além de `exit_gap` (o tamanho do buraco).
-- **Censura à esquerda marcada:** se o navio já estava parado no primeiro avistamento (`start_censored`), a espera começou antes de o vermos. A view `anchorage_waits` tem a coluna `complete` (início observado e saída com buraco ≤ 1 h) para separar esperas confiáveis nas métricas.
+- **Censura à esquerda marcada:** se o navio já estava parado no primeiro avistamento (`start_censored`), a espera começou antes de o vermos. A view `anchorage_waits` tem a coluna `complete` (início observado e no máximo 1 h coberta sem ver a saída) para separar esperas confiáveis nas métricas.
+- **Cobertura medida pelo próprio stream:** o fundeadouro de Santos fica quase sem sinal AIS todo dia das 10h às 17h UTC (2–10 posições/h contra 20–124 no resto do dia), provavelmente por causa dos receptores em terra. Com uma regra de "6 h de relógio", 70% dos `signal_lost` eram falsos: o navio continuava fundeado, quem sumia era o receptor. Agora o job conta as posições por hora em cada fundeadouro e manda essa contagem por *broadcast* para o operador de cada navio. Só contam as horas **cobertas** (≥ 15 posições de qualquer navio). A decisão é preguiçosa: se ainda não há horas cobertas suficientes, o timer é reagendado para a hora seguinte, então o resultado não depende da ordem de chegada entre a contagem e o timer.
+- **Mesma contagem no ClickHouse:** a cobertura vai para `ais.zone_coverage`, e a coluna `complete` conta só as horas cobertas dentro do buraco da saída. Uma saída durante a janela cega deixa de ser descartada automaticamente, e o critério pode ser ajustado sem reprocessar o stream.
 - **At-least-once + deduplicação no destino:** a tabela `ais.events` é `ReplacingMergeTree` por `(event_type, mmsi, ts)`.
 - **Zonas derivadas dos dados** (`flink/job/zones/santos.geojson`, montadas no container): o fundeadouro é a envoltória das posições com status "fundeado" (51 navios) com ~1,2 km de folga; o porto, a envoltória das posições paradas no estuário com ~400 m. Ao trocar as zonas, `scripts/reprocessar-eventos.ps1` recalcula todos os eventos a partir do histórico do Kafka.
 

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS ais.events
     wait_min_s      Nullable(UInt32)                  COMMENT 'Espera mínima (até a última vez visto dentro)',
     exit_gap_s      Nullable(UInt32)                  COMMENT 'Buraco entre a última vez dentro e a primeira vez fora',
     start_censored  Nullable(Bool)                    COMMENT 'Já parado no primeiro avistamento: espera subestimada',
+    covered_gap_h   Nullable(UInt16)                  COMMENT 'signal_lost: horas cobertas sem sinal do navio (0 = encerrado pelo teto de 48 h)',
     received_at     DateTime64(3, 'UTC')              COMMENT 'Quando o ClickHouse leu o evento do Kafka'
 )
 ENGINE = ReplacingMergeTree
@@ -37,6 +38,8 @@ ALTER TABLE ais.events ADD COLUMN IF NOT EXISTS last_inside_ts Nullable(DateTime
 ALTER TABLE ais.events ADD COLUMN IF NOT EXISTS wait_min_s     Nullable(UInt32)               AFTER last_inside_ts;
 ALTER TABLE ais.events ADD COLUMN IF NOT EXISTS exit_gap_s     Nullable(UInt32)               AFTER wait_min_s;
 ALTER TABLE ais.events ADD COLUMN IF NOT EXISTS start_censored Nullable(Bool)                 AFTER exit_gap_s;
+-- v3 (cobertura medida pelo stream)
+ALTER TABLE ais.events ADD COLUMN IF NOT EXISTS covered_gap_h  Nullable(UInt16)               AFTER start_censored;
 
 CREATE TABLE IF NOT EXISTS ais.kafka_ais_events
 (
@@ -74,14 +77,62 @@ SELECT
     if(JSONHas(raw, 'wait_min_s'), toUInt32(JSONExtractUInt(raw, 'wait_min_s')), NULL)           AS wait_min_s,
     if(JSONHas(raw, 'exit_gap_s'), toUInt32(JSONExtractUInt(raw, 'exit_gap_s')), NULL)           AS exit_gap_s,
     if(JSONHas(raw, 'start_censored'), JSONExtractBool(raw, 'start_censored') = 1, NULL)         AS start_censored,
+    if(JSONHas(raw, 'covered_gap_h'), toUInt16(JSONExtractUInt(raw, 'covered_gap_h')), NULL)     AS covered_gap_h,
     now64(3, 'UTC')                                                                              AS received_at
 FROM ais.kafka_ais_events
-WHERE JSONHas(raw, 'event_type') AND JSONHas(raw, 'ts_ms');
+WHERE JSONHas(raw, 'event_type') AND JSONHas(raw, 'ts_ms')
+  AND JSONExtractString(raw, 'event_type') != 'zone_coverage';   -- cobertura vai para ais.zone_coverage
+
+
+-- -----------------------------------------------------------------------------
+-- Cobertura por hora de cada fundeadouro (contada pelo Flink, mesmo polígono das
+-- regras). Chega no mesmo tópico com event_type = 'zone_coverage', mas tem consumer
+-- group próprio: assim a MV acima pode ser recriada sem perder mensagens daqui.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ais.zone_coverage
+(
+    zone         LowCardinality(String)  COMMENT 'Fundeadouro',
+    hour         DateTime('UTC')         COMMENT 'Início da hora',
+    positions    UInt32                  COMMENT 'Posições (de qualquer navio) dentro da zona naquela hora',
+    received_at  DateTime64(3, 'UTC')
+)
+ENGINE = ReplacingMergeTree(received_at)
+ORDER BY (zone, hour)
+COMMENT 'Posições por hora em cada fundeadouro (hora sem linha = nenhuma posição)';
+
+CREATE TABLE IF NOT EXISTS ais.kafka_ais_coverage
+(
+    raw String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list   = 'kafka:9092',
+    kafka_topic_list    = 'ais.events',
+    kafka_group_name    = 'clickhouse-ais-coverage',
+    kafka_format        = 'RawBLOB',
+    kafka_num_consumers = 1;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS ais.mv_kafka_to_coverage
+TO ais.zone_coverage
+AS
+SELECT
+    JSONExtractString(raw, 'zone')                                           AS zone,
+    toDateTime(intDiv(JSONExtractInt(raw, 'ts_ms'), 1000), 'UTC')            AS hour,
+    toUInt32(JSONExtractUInt(raw, 'positions'))                              AS positions,
+    now64(3, 'UTC')                                                          AS received_at
+FROM ais.kafka_ais_coverage
+WHERE JSONExtractString(raw, 'event_type') = 'zone_coverage';
 
 
 -- -----------------------------------------------------------------------------
 -- Views de leitura (base para a Fase 5 / Grafana)
 -- -----------------------------------------------------------------------------
+
+-- Hora coberta = pelo menos 15 posições na zona (mesmo limite do signal_lost no Flink).
+-- Horas cegas de Santos (10h–17h UTC) ficam com 2–10 e as normais com 20–124.
+CREATE OR REPLACE VIEW ais.anchorage_coverage AS
+SELECT zone, hour, positions, positions >= 15 AS covered
+FROM ais.zone_coverage FINAL;
 
 -- Uma linha por espera concluída: quanto tempo o navio ficou parado no
 -- fundeadouro e, se chegou ao porto, quanto tempo levou no total.
@@ -101,9 +152,12 @@ SELECT
     round(e.wait_min_s / 3600, 2)           AS wait_min_h,
     round(e.wait_s / 3600, 2)               AS wait_max_h,
     round(e.exit_gap_s / 3600, 2)           AS exit_gap_h,
+    -- Horas cheias COBERTAS dentro do buraco da saída: buraco na janela cega não conta contra
+    arrayCount(h -> h > toStartOfHour(ifNull(e.last_inside_ts, e.ts)) AND addHours(h, 1) <= e.ts,
+               c.covered_hours)             AS exit_gap_covered_h,
     ifNull(e.start_censored, false)         AS start_censored,
-    -- Espera "boa" para métricas: início observado e saída vista com no máximo 1 h de buraco
-    NOT ifNull(e.start_censored, false) AND ifNull(e.exit_gap_s, 0) <= 3600 AS complete,
+    -- Espera "boa" para métricas: início observado e no máximo 1 h coberta sem ver a saída
+    NOT ifNull(e.start_censored, false) AND exit_gap_covered_h <= 1 AS complete,
     a.arrival_ts                            AS port_arrival_ts,
     a.total_s                               AS total_s
 FROM
@@ -118,6 +172,13 @@ LEFT JOIN
     FROM ais.events FINAL
     WHERE event_type = 'port_arrival'
 ) AS a ON a.mmsi = e.mmsi AND a.wait_start_ts = e.wait_start_ts
+LEFT JOIN
+(
+    SELECT zone, groupArray(hour) AS covered_hours
+    FROM ais.anchorage_coverage
+    WHERE covered
+    GROUP BY zone
+) AS c ON c.zone = e.zone
 LEFT JOIN ais.ships AS s ON s.mmsi = e.mmsi;
 
 -- Navios esperando agora: o último evento de fundeadouro do navio é wait_start.
